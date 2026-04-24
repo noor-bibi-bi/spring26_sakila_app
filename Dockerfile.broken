@@ -1,0 +1,19 @@
+FROM python:3.9
+
+WORKDIR /app
+COPY . /app
+
+RUN pip install flask
+RUN pip install pymysql
+RUN pip install cryptography
+
+ENV MYSQL_HOST=localhost
+ENV MYSQL_USER=root
+ENV MYSQL_PASSWORD=supersecretpassword
+ENV MYSQL_DB=sakila
+
+EXPOSE 5000
+EXPOSE 3306
+EXPOSE 22
+
+CMD ["python", "app.py"]
