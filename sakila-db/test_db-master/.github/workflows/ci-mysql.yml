@@ -1,0 +1,452 @@
+name: CI MySQL
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Weekly on Monday at 3:07 AM UTC
+    - cron: '7 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  employees-mysql:
+    name: Employees DB (${{ matrix.mysql-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql-version:
+          - '5.6.51'
+          - '5.7.44'
+          - '8.0.42'
+          - '8.4.8'
+          - '9.0.1'
+          - '9.2.0'
+          - '9.5.0'
+          - '9.6.0'
+    env:
+      SANDBOX_BINARY: ${{ github.workspace }}/opt/mysql
+      MYSQL_VERSION: ${{ matrix.mysql-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libaio1 libnuma1 libncurses5
+
+      - name: Install dbdeployer
+        run: |
+          curl -s https://raw.githubusercontent.com/ProxySQL/dbdeployer/master/scripts/dbdeployer-install.sh | bash
+          sudo mv dbdeployer /usr/local/bin/dbdeployer
+
+      - name: Cache MySQL tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mysql-tarball
+          key: mysql-${{ matrix.mysql-version }}-linux-x86_64-v3
+
+      - name: Download MySQL
+        run: |
+          SHORT_VER="${MYSQL_VERSION%.*}"
+          mkdir -p /tmp/mysql-tarball
+          CACHED=$(ls /tmp/mysql-tarball/mysql-${MYSQL_VERSION}-linux-*.tar.* 2>/dev/null | head -1)
+          if [ -n "$CACHED" ]; then
+            echo "Using cached tarball: $CACHED"
+            ls -lh "$CACHED"
+            exit 0
+          fi
+          # MySQL 5.x uses .tar.gz / glibc2.12; 8.x+ uses .tar.xz / glibc2.17; 9.6+ uses glibc2.28
+          MAJOR=$(echo "$MYSQL_VERSION" | cut -d. -f1)
+          if [ "$MAJOR" -lt 8 ]; then
+            GLIBCS="glibc2.12"
+            EXT="tar.gz"
+          else
+            GLIBCS="glibc2.17 glibc2.28"
+            EXT="tar.xz"
+          fi
+          for GLIBC in $GLIBCS; do
+            TARBALL="mysql-${MYSQL_VERSION}-linux-${GLIBC}-x86_64.${EXT}"
+            URL="https://dev.mysql.com/get/Downloads/MySQL-${SHORT_VER}/${TARBALL}"
+            echo "Trying ${GLIBC} (${EXT})..."
+            if curl -L -f -o "/tmp/mysql-tarball/$TARBALL" "$URL"; then
+              ls -lh "/tmp/mysql-tarball/$TARBALL"
+              exit 0
+            fi
+          done
+          echo "ERROR: Could not download MySQL ${MYSQL_VERSION}"
+          exit 1
+
+      - name: Unpack MySQL
+        run: |
+          mkdir -p "$SANDBOX_BINARY"
+          TARBALL=$(ls /tmp/mysql-tarball/mysql-${MYSQL_VERSION}-linux-*.tar.* | head -1)
+          dbdeployer unpack "$TARBALL" \
+            --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Deploy sandbox
+        run: |
+          dbdeployer deploy single "$MYSQL_VERSION" \
+            --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Detect MySQL features
+        id: features
+        run: |
+          # --commands flag only exists in MySQL 9.5+ (SOURCE default changed to FALSE)
+          MAJOR=$(echo "$MYSQL_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$MYSQL_VERSION" | cut -d. -f2)
+          NEEDS_COMMANDS="false"
+          if [ "$MAJOR" -gt 9 ] || { [ "$MAJOR" -eq 9 ] && [ "$MINOR" -ge 5 ]; }; then
+            NEEDS_COMMANDS="true"
+          fi
+          # Check if MD5()/SHA() are available (both removed in MySQL 9.6+)
+          HAS_MD5="true"
+          HAS_SHA="true"
+          if [ "$MAJOR" -gt 9 ] || { [ "$MAJOR" -eq 9 ] && [ "$MINOR" -ge 6 ]; }; then
+            HAS_MD5="false"
+            HAS_SHA="false"
+          fi
+          echo "needs_commands=$NEEDS_COMMANDS" >> "$GITHUB_OUTPUT"
+          echo "has_md5=$HAS_MD5" >> "$GITHUB_OUTPUT"
+          echo "has_sha=$HAS_SHA" >> "$GITHUB_OUTPUT"
+          echo "MySQL $MYSQL_VERSION: needs_commands=$NEEDS_COMMANDS, has_md5=$HAS_MD5, has_sha=$HAS_SHA"
+
+      - name: Load employees database
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS < employees.sql
+
+      - name: Test MD5 integrity
+        if: steps.features.outputs.has_md5 == 'true'
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS -t < test_employees_md5.sql > /tmp/test_md5.txt
+          cat /tmp/test_md5.txt
+          md5_ok=$(grep -iw ok /tmp/test_md5.txt | wc -l | tr -d ' \t')
+          if [ "$md5_ok" != "8" ]; then
+            echo "MD5 FAIL - expected 8 OK - found $md5_ok"
+            exit 1
+          fi
+          echo "MD5 OK ($md5_ok matches)"
+
+      - name: Test SHA integrity
+        if: steps.features.outputs.has_sha == 'true'
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS -t < test_employees_sha.sql > /tmp/test_sha.txt
+          cat /tmp/test_sha.txt
+          sha_ok=$(grep -iw ok /tmp/test_sha.txt | wc -l | tr -d ' \t')
+          if [ "$sha_ok" != "8" ]; then
+            echo "SHA FAIL - expected 8 OK - found $sha_ok"
+            exit 1
+          fi
+          echo "SHA OK ($sha_ok matches)"
+
+      - name: Test SHA2 integrity
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS -t < test_employees_sha2.sql > /tmp/test_sha2.txt
+          cat /tmp/test_sha2.txt
+          sha2_ok=$(grep -iw ok /tmp/test_sha2.txt | wc -l | tr -d ' \t')
+          if [ "$sha2_ok" != "8" ]; then
+            echo "SHA2 FAIL - expected 8 OK - found $sha2_ok"
+            exit 1
+          fi
+          echo "SHA2 OK ($sha2_ok matches)"
+
+      - name: Load objects (stored procedures/functions)
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS < objects.sql
+
+      - name: Test stored procedures
+        run: |
+          SBDIR=$(ls -d ~/sandboxes/msb_*)
+          $SBDIR/use -BN -e "SELECT emp_name(10001);" employees
+          $SBDIR/use -BN -e "SELECT emp_dept_name(10001);" employees
+          $SBDIR/use -BN -e "SELECT current_manager('d001');" employees
+          $SBDIR/use -t -e "CALL show_departments();" employees
+          $SBDIR/use -BN -e "SELECT COUNT(*) FROM v_full_employees;" employees
+          $SBDIR/use -BN -e "SELECT COUNT(*) FROM v_full_departments;" employees
+
+      - name: Cleanup
+        if: always()
+        run: |
+          dbdeployer delete all --skip-confirm 2>/dev/null || true
+          pkill -9 -u "$USER" mysqld 2>/dev/null || true
+
+  partitioned-mysql:
+    name: Employees Partitioned (${{ matrix.mysql-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql-version:
+          - '5.6.51'
+          - '5.7.44'
+          - '8.0.42'
+          - '8.4.8'
+          - '9.0.1'
+          - '9.2.0'
+          - '9.5.0'
+          - '9.6.0'
+    env:
+      SANDBOX_BINARY: ${{ github.workspace }}/opt/mysql
+      MYSQL_VERSION: ${{ matrix.mysql-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libaio1 libnuma1 libncurses5
+
+      - name: Install dbdeployer
+        run: |
+          curl -s https://raw.githubusercontent.com/ProxySQL/dbdeployer/master/scripts/dbdeployer-install.sh | bash
+          sudo mv dbdeployer /usr/local/bin/dbdeployer
+
+      - name: Cache MySQL tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mysql-tarball
+          key: mysql-${{ matrix.mysql-version }}-linux-x86_64-v3
+
+      - name: Download MySQL
+        run: |
+          SHORT_VER="${MYSQL_VERSION%.*}"
+          mkdir -p /tmp/mysql-tarball
+          CACHED=$(ls /tmp/mysql-tarball/mysql-${MYSQL_VERSION}-linux-*.tar.* 2>/dev/null | head -1)
+          if [ -n "$CACHED" ]; then
+            echo "Using cached tarball: $CACHED"
+            ls -lh "$CACHED"
+            exit 0
+          fi
+          MAJOR=$(echo "$MYSQL_VERSION" | cut -d. -f1)
+          if [ "$MAJOR" -lt 8 ]; then
+            GLIBCS="glibc2.12"
+            EXT="tar.gz"
+          else
+            GLIBCS="glibc2.17 glibc2.28"
+            EXT="tar.xz"
+          fi
+          for GLIBC in $GLIBCS; do
+            TARBALL="mysql-${MYSQL_VERSION}-linux-${GLIBC}-x86_64.${EXT}"
+            URL="https://dev.mysql.com/get/Downloads/MySQL-${SHORT_VER}/${TARBALL}"
+            echo "Trying ${GLIBC}..."
+            if curl -L -f -o "/tmp/mysql-tarball/$TARBALL" "$URL"; then
+              ls -lh "/tmp/mysql-tarball/$TARBALL"
+              exit 0
+            fi
+          done
+          echo "ERROR: Could not download MySQL ${MYSQL_VERSION}"
+          exit 1
+
+      - name: Unpack MySQL
+        run: |
+          mkdir -p "$SANDBOX_BINARY"
+          TARBALL=$(ls /tmp/mysql-tarball/mysql-${MYSQL_VERSION}-linux-*.tar.* | head -1)
+          dbdeployer unpack "$TARBALL" \
+            --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Deploy sandbox
+        run: |
+          dbdeployer deploy single "$MYSQL_VERSION" \
+            --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Detect MySQL features
+        id: features
+        run: |
+          MAJOR=$(echo "$MYSQL_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$MYSQL_VERSION" | cut -d. -f2)
+          NEEDS_COMMANDS="false"
+          if [ "$MAJOR" -gt 9 ] || { [ "$MAJOR" -eq 9 ] && [ "$MINOR" -ge 5 ]; }; then
+            NEEDS_COMMANDS="true"
+          fi
+          HAS_MD5="true"
+          if [ "$MAJOR" -gt 9 ] || { [ "$MAJOR" -eq 9 ] && [ "$MINOR" -ge 6 ]; }; then
+            HAS_MD5="false"
+          fi
+          echo "needs_commands=$NEEDS_COMMANDS" >> "$GITHUB_OUTPUT"
+          echo "has_md5=$HAS_MD5" >> "$GITHUB_OUTPUT"
+
+      - name: Load partitioned employees database
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS < employees_partitioned.sql
+
+      - name: Verify partitioning
+        run: |
+          SBDIR=$(ls -d ~/sandboxes/msb_*)
+          PART_COUNT=$($SBDIR/use -BN -e \
+            "SELECT COUNT(*) FROM information_schema.partitions WHERE table_schema='employees' AND table_name='titles';" \
+            employees)
+          echo "titles partitions: $PART_COUNT"
+          [ "$PART_COUNT" -ge 18 ] || { echo "FAIL: expected >= 18 partitions on titles"; exit 1; }
+          PART_COUNT=$($SBDIR/use -BN -e \
+            "SELECT COUNT(*) FROM information_schema.partitions WHERE table_schema='employees' AND table_name='salaries';" \
+            employees)
+          echo "salaries partitions: $PART_COUNT"
+          [ "$PART_COUNT" -ge 18 ] || { echo "FAIL: expected >= 18 partitions on salaries"; exit 1; }
+
+      - name: Test MD5 integrity
+        if: steps.features.outputs.has_md5 == 'true'
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS -t < test_employees_md5.sql > /tmp/test_md5.txt
+          cat /tmp/test_md5.txt
+          md5_ok=$(grep -iw ok /tmp/test_md5.txt | wc -l | tr -d ' \t')
+          if [ "$md5_ok" != "8" ]; then
+            echo "MD5 FAIL - expected 8 OK - found $md5_ok"
+            exit 1
+          fi
+          echo "MD5 OK ($md5_ok matches)"
+
+      - name: Test SHA2 integrity
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS -t < test_employees_sha2.sql > /tmp/test_sha2.txt
+          cat /tmp/test_sha2.txt
+          sha2_ok=$(grep -iw ok /tmp/test_sha2.txt | wc -l | tr -d ' \t')
+          if [ "$sha2_ok" != "8" ]; then
+            echo "SHA2 FAIL - expected 8 OK - found $sha2_ok"
+            exit 1
+          fi
+          echo "SHA2 OK ($sha2_ok matches)"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          dbdeployer delete all --skip-confirm 2>/dev/null || true
+          pkill -9 -u "$USER" mysqld 2>/dev/null || true
+
+  sakila-mysql:
+    name: Sakila DB (${{ matrix.mysql-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql-version:
+          - '5.6.51'
+          - '5.7.44'
+          - '8.0.42'
+          - '8.4.8'
+          - '9.0.1'
+          - '9.2.0'
+          - '9.5.0'
+          - '9.6.0'
+    env:
+      SANDBOX_BINARY: ${{ github.workspace }}/opt/mysql
+      MYSQL_VERSION: ${{ matrix.mysql-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libaio1 libnuma1 libncurses5
+
+      - name: Install dbdeployer
+        run: |
+          curl -s https://raw.githubusercontent.com/ProxySQL/dbdeployer/master/scripts/dbdeployer-install.sh | bash
+          sudo mv dbdeployer /usr/local/bin/dbdeployer
+
+      - name: Cache MySQL tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/mysql-tarball
+          key: mysql-${{ matrix.mysql-version }}-linux-x86_64-v3
+
+      - name: Download MySQL
+        run: |
+          SHORT_VER="${MYSQL_VERSION%.*}"
+          mkdir -p /tmp/mysql-tarball
+          CACHED=$(ls /tmp/mysql-tarball/mysql-${MYSQL_VERSION}-linux-*.tar.* 2>/dev/null | head -1)
+          if [ -n "$CACHED" ]; then
+            echo "Using cached tarball: $CACHED"
+            ls -lh "$CACHED"
+            exit 0
+          fi
+          MAJOR=$(echo "$MYSQL_VERSION" | cut -d. -f1)
+          if [ "$MAJOR" -lt 8 ]; then
+            GLIBCS="glibc2.12"
+            EXT="tar.gz"
+          else
+            GLIBCS="glibc2.17 glibc2.28"
+            EXT="tar.xz"
+          fi
+          for GLIBC in $GLIBCS; do
+            TARBALL="mysql-${MYSQL_VERSION}-linux-${GLIBC}-x86_64.${EXT}"
+            URL="https://dev.mysql.com/get/Downloads/MySQL-${SHORT_VER}/${TARBALL}"
+            echo "Trying ${GLIBC}..."
+            if curl -L -f -o "/tmp/mysql-tarball/$TARBALL" "$URL"; then
+              ls -lh "/tmp/mysql-tarball/$TARBALL"
+              exit 0
+            fi
+          done
+          echo "ERROR: Could not download MySQL ${MYSQL_VERSION}"
+          exit 1
+
+      - name: Unpack MySQL
+        run: |
+          mkdir -p "$SANDBOX_BINARY"
+          TARBALL=$(ls /tmp/mysql-tarball/mysql-${MYSQL_VERSION}-linux-*.tar.* | head -1)
+          dbdeployer unpack "$TARBALL" \
+            --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Deploy sandbox
+        run: |
+          dbdeployer deploy single "$MYSQL_VERSION" \
+            --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Detect MySQL features
+        id: features
+        run: |
+          MAJOR=$(echo "$MYSQL_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$MYSQL_VERSION" | cut -d. -f2)
+          NEEDS_COMMANDS="false"
+          if [ "$MAJOR" -gt 9 ] || { [ "$MAJOR" -eq 9 ] && [ "$MINOR" -ge 5 ]; }; then
+            NEEDS_COMMANDS="true"
+          fi
+          echo "needs_commands=$NEEDS_COMMANDS" >> "$GITHUB_OUTPUT"
+          echo "MySQL $MYSQL_VERSION: needs_commands=$NEEDS_COMMANDS"
+
+      - name: Load Sakila schema
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS < sakila/sakila-mv-schema.sql
+
+      - name: Load Sakila data
+        run: |
+          EXTRA_ARGS=""
+          [ "${{ steps.features.outputs.needs_commands }}" == "true" ] && EXTRA_ARGS="--commands"
+          ~/sandboxes/msb_*/use $EXTRA_ARGS < sakila/sakila-mv-data.sql
+
+      - name: Verify Sakila data
+        run: |
+          SBDIR=$(ls -d ~/sandboxes/msb_*)
+          for table in actor film customer rental payment staff store; do
+            COUNT=$($SBDIR/use -BN -e "SELECT COUNT(*) FROM $table;" sakila)
+            echo "$table: $COUNT rows"
+            [ "$COUNT" -gt 0 ] || { echo "FAIL: $table is empty"; exit 1; }
+          done
+          $SBDIR/use -BN -e "SELECT COUNT(*) FROM film_list;" sakila
+          $SBDIR/use -BN -e "SELECT COUNT(*) FROM customer_list;" sakila
+
+      - name: Cleanup
+        if: always()
+        run: |
+          dbdeployer delete all --skip-confirm 2>/dev/null || true
+          pkill -9 -u "$USER" mysqld 2>/dev/null || true

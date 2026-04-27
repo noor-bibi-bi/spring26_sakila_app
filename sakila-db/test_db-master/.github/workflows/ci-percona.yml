@@ -1,0 +1,112 @@
+name: CI Percona
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Weekly on Monday at 3:07 AM UTC
+    - cron: '7 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  employees-percona:
+    name: Employees DB (${{ matrix.percona-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        percona-version:
+          - '8.0.36-28'
+          - '8.4.2-2'
+    env:
+      SANDBOX_BINARY: ${{ github.workspace }}/opt/mysql
+      PERCONA_VERSION: ${{ matrix.percona-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libaio1 libnuma1 libncurses5
+
+      - name: Install dbdeployer
+        run: |
+          curl -s https://raw.githubusercontent.com/ProxySQL/dbdeployer/master/scripts/dbdeployer-install.sh | bash
+          sudo mv dbdeployer /usr/local/bin/dbdeployer
+
+      - name: Cache Percona tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/percona-tarball
+          key: percona-${{ matrix.percona-version }}-linux-x86_64-v1
+
+      - name: Download Percona Server
+        run: |
+          MAJOR_MINOR=$(echo "$PERCONA_VERSION" | grep -oP '^\d+\.\d+')
+          GLIBC="glibc2.35"
+          TARBALL="Percona-Server-${PERCONA_VERSION}-Linux.x86_64.${GLIBC}-minimal.tar.gz"
+          URL="https://downloads.percona.com/downloads/Percona-Server-${MAJOR_MINOR}/Percona-Server-${PERCONA_VERSION}/binary/tarball/${TARBALL}"
+          mkdir -p /tmp/percona-tarball
+          if [ ! -f "/tmp/percona-tarball/$TARBALL" ]; then
+            echo "Downloading Percona Server ${PERCONA_VERSION} (${GLIBC})..."
+            curl -L -f -o "/tmp/percona-tarball/$TARBALL" "$URL" || {
+              GLIBC="glibc2.17"
+              TARBALL="Percona-Server-${PERCONA_VERSION}-Linux.x86_64.${GLIBC}-minimal.tar.gz"
+              URL="https://downloads.percona.com/downloads/Percona-Server-${MAJOR_MINOR}/Percona-Server-${PERCONA_VERSION}/binary/tarball/${TARBALL}"
+              echo "Retrying with glibc2.17..."
+              curl -L -f -o "/tmp/percona-tarball/$TARBALL" "$URL"
+            }
+          fi
+          ls -lh "/tmp/percona-tarball/"*.tar.gz
+
+      - name: Unpack Percona Server
+        run: |
+          mkdir -p "$SANDBOX_BINARY"
+          TARBALL=$(ls /tmp/percona-tarball/Percona-Server-*.tar.gz | head -1)
+          dbdeployer unpack "$TARBALL" --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Deploy sandbox
+        run: |
+          VERSION=$(ls "$SANDBOX_BINARY" | head -1)
+          echo "Deploying Percona Server $VERSION..."
+          dbdeployer deploy single "$VERSION" --sandbox-binary="$SANDBOX_BINARY"
+
+      - name: Load employees database
+        run: |
+          ~/sandboxes/msb_*/use < employees.sql
+
+      - name: Test MD5 integrity
+        run: |
+          ~/sandboxes/msb_*/use -t < test_employees_md5.sql > /tmp/test_md5.txt
+          cat /tmp/test_md5.txt
+          md5_ok=$(grep -iw ok /tmp/test_md5.txt | wc -l | tr -d ' \t')
+          if [ "$md5_ok" != "8" ]; then
+            echo "MD5 FAIL - expected 8 OK - found $md5_ok"
+            exit 1
+          fi
+          echo "MD5 OK ($md5_ok matches)"
+
+      - name: Test SHA integrity
+        run: |
+          ~/sandboxes/msb_*/use -t < test_employees_sha.sql > /tmp/test_sha.txt
+          cat /tmp/test_sha.txt
+          sha_ok=$(grep -iw ok /tmp/test_sha.txt | wc -l | tr -d ' \t')
+          if [ "$sha_ok" != "8" ]; then
+            echo "SHA FAIL - expected 8 OK - found $sha_ok"
+            exit 1
+          fi
+          echo "SHA OK ($sha_ok matches)"
+
+      - name: Verify Percona Server version
+        run: |
+          VERSION=$(~/sandboxes/msb_*/use -BN -e "SELECT VERSION();")
+          echo "Server version: $VERSION"
+          echo "$VERSION" | grep -iq percona || echo "Note: version string does not contain 'percona'"
+          echo "OK: Server running"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          dbdeployer delete all --skip-confirm 2>/dev/null || true
+          pkill -9 -u "$USER" mysqld 2>/dev/null || true
