@@ -19,7 +19,7 @@ jobs:
   deploy-staging:
     if: (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || (github.event_name == 'push')
     runs-on: ubuntu-latest
-    environment: 
+    environment:
       name: staging
     steps:
       - name: Checkout code
@@ -47,7 +47,8 @@ jobs:
           echo "- **Status**: Success :white_check_mark:" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify
-        run: echo "Slack notification: Deployment to staging successful"
+        run: |
+          echo "Slack notification: Deployment to staging successful"
 
   deploy-production:
     needs: deploy-staging
@@ -77,4 +78,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify
-        run: echo "Slack notification: Deployment to production successful"
+        run: |
+          echo "Slack notification: Deployment to production successful"
