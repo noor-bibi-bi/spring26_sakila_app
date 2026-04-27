@@ -34,7 +34,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest -v
+          python -m pytest tests/ -v
 
   # --- CD JOB: Docker Build ---
   build:

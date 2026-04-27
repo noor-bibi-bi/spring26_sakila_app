@@ -74,7 +74,7 @@ jobs:
           MYSQL_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
           MYSQL_DB: ${{ env.MYSQL_DATABASE }}
           PYTHONPATH: ${{ github.workspace }}
-        run: pytest -v
+        run: python -m pytest tests/ -v
 
   build:
     runs-on: ubuntu-latest
