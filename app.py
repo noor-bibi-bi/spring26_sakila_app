@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, flash
+from flask import Flask, render_template, request, flash, jsonify
 import pymysql
 from config import Config
 
@@ -78,6 +78,7 @@ def dashboard():
                 JOIN address a ON s.address_id = a.address_id
                 JOIN city ci ON a.city_id = ci.city_id
                 JOIN country co ON ci.country_id = co.country_id
+                WHERE s.store_id IS NOT NULL
             """)
             store_stats = cur.fetchall()
 
@@ -210,6 +211,36 @@ def films():
     except Exception as e:
         flash(f"Error fetching films: {str(e)}", "error")
         return render_template("films.html", films=[])
+
+
+@app.route("/api/actor/<int:actor_id>")
+def get_api_actor(actor_id):
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM actor WHERE actor_id = %s", (actor_id,))
+            actor = cur.fetchone()
+        conn.close()
+        if actor:
+            return jsonify(actor)
+        return jsonify({"error": "Actor not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/film/<int:film_id>")
+def get_api_film(film_id):
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM film WHERE film_id = %s", (film_id,))
+            film = cur.fetchone()
+        conn.close()
+        if film:
+            return jsonify(film)
+        return jsonify({"error": "Film not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

@@ -7,77 +7,124 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: 3.9
+  PYTHON_VERSION: '3.9'
   IMAGE_NAME: sakila-app
+  MYSQL_DATABASE: sakila
+  MYSQL_ROOT_PASSWORD: admin
 
 concurrency:
-  group: ${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - run: pip install flake8
+      - name: Install flake8
+        run: pip install flake8
 
-      - run: flake8 . --max-line-length=120 --ignore=E501,W503
-
+      - name: Run flake8
+        run: flake8 . --max-line-length=120 --ignore=E501,W503
 
   test:
     runs-on: ubuntu-latest
     needs: lint
-
     services:
       mysql:
-        image: mysql:8
+        image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: admin
-          MYSQL_DATABASE: sakila
+          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h localhost"
+          --health-cmd="mysqladmin ping"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
-
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Set PYTHONPATH
-        run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+      - name: Load Sakila Database
+        run: |
+          mysql -h localhost -u root -p${{ env.MYSQL_ROOT_PASSWORD }} ${{ env.MYSQL_DATABASE }} < sakila-db/test_db-master/sakila/sakila-mv-schema.sql
+          mysql -h localhost -u root -p${{ env.MYSQL_ROOT_PASSWORD }} ${{ env.MYSQL_DATABASE }} < sakila-db/test_db-master/sakila/sakila-mv-data.sql
+        env:
+          MYSQL_PWD: ${{ env.MYSQL_ROOT_PASSWORD }}
 
-      - run: pytest -v
-
+      - name: Run tests
+        env:
+          MYSQL_HOST: localhost
+          MYSQL_USER: root
+          MYSQL_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DB: ${{ env.MYSQL_DATABASE }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: pytest -v
 
   build:
     runs-on: ubuntu-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t sakila-app:${{ github.sha }} .
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Verify image
+        run: docker images ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Smoke test
+        run: |
+          docker run -d -p 5000:5000 --name smoke-test ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          sleep 10
+          curl --retry 5 --retry-connrefused http://localhost:5000 || exit 1
+          docker stop smoke-test
+          docker rm smoke-test
 
   security-scan:
     runs-on: ubuntu-latest
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t sakila-app:${{ github.sha }} .
-      - uses: aquasecurity/trivy-action@0.24.0
+
+      - name: Build Docker image
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.24.0
         with:
-          image-ref: sakila-app:${{ github.sha }}
-          exit-code: 0
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy and save report
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          format: 'json'
+          output: 'trivy-results.json'
+
+      - name: Upload Trivy scan results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.json
