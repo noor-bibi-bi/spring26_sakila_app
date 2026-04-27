@@ -14,7 +14,33 @@ on:
       - docker-compose.yml
 
 jobs:
-  placeholder:
+
+  deploy-staging:
     runs-on: ubuntu-latest
+    environment: staging
+
     steps:
-      - run: echo "Deployment workflow triggered"
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Print environment variables
+        run: |
+          echo "Deploying to STAGING environment"
+          echo "Branch: $GITHUB_REF"
+          echo "Commit: $GITHUB_SHA"
+
+      - name: Build Docker Image (staging)
+        run: docker build -t sakila-app:staging .
+
+      - name: Run container (simulation)
+        run: docker run -d -p 5000:5000 sakila-app:staging
+
+      - name: Deployment Summary
+        run: |
+          echo "##  Staging Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment: Staging" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: sakila-app:staging" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: Success " >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify
+        run: echo "Slack notification: Deployment to staging successful"
