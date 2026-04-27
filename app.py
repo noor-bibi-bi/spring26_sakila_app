@@ -245,5 +245,3 @@ def get_api_film(film_id):
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
-#   t r i g g e r   d e p l o y  
- 
