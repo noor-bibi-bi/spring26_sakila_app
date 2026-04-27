@@ -62,14 +62,14 @@ jobs:
 
       - name: Load Sakila Database
         run: |
-          mysql -h localhost -u root -p${{ env.MYSQL_ROOT_PASSWORD }} ${{ env.MYSQL_DATABASE }} < sakila-db/test_db-master/sakila/sakila-mv-schema.sql
-          mysql -h localhost -u root -p${{ env.MYSQL_ROOT_PASSWORD }} ${{ env.MYSQL_DATABASE }} < sakila-db/test_db-master/sakila/sakila-mv-data.sql
+          mysql -h 127.0.0.1 -u root -p${{ env.MYSQL_ROOT_PASSWORD }} --protocol=tcp ${{ env.MYSQL_DATABASE }} < sakila-db/test_db-master/sakila/sakila-mv-schema.sql
+          mysql -h 127.0.0.1 -u root -p${{ env.MYSQL_ROOT_PASSWORD }} --protocol=tcp ${{ env.MYSQL_DATABASE }} < sakila-db/test_db-master/sakila/sakila-mv-data.sql
         env:
           MYSQL_PWD: ${{ env.MYSQL_ROOT_PASSWORD }}
 
       - name: Run tests
         env:
-          MYSQL_HOST: localhost
+          MYSQL_HOST: 127.0.0.1
           MYSQL_USER: root
           MYSQL_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
           MYSQL_DB: ${{ env.MYSQL_DATABASE }}
