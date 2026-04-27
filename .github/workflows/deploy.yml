@@ -5,17 +5,23 @@ on:
     workflows: ["CI Pipeline"]
     types:
       - completed
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
 
 permissions:
   contents: write
 
 jobs:
-
   deploy-staging:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
+    if: |
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'push')
     runs-on: ubuntu-latest
     environment: staging
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -23,40 +29,41 @@ jobs:
       - name: Print environment variables
         run: |
           echo "Deploying to STAGING environment"
-          echo "Branch: $GITHUB_REF"
+          echo "Run ID: $GITHUB_RUN_ID"
+          echo "Trigger: $GITHUB_EVENT_NAME"
           echo "Commit: $GITHUB_SHA"
 
-      - name: Build Docker Image (staging)
-        run: docker build -t sakila-app:staging .
-
-      - name: Run container (simulation)
-        run: docker run -d -p 5000:5000 sakila-app:staging
+      - name: Run Docker staging
+        run: |
+          docker build -t sakila-app:staging .
+          docker run -d -p 5000:5000 --name staging-container sakila-app:staging
+          sleep 10
+          docker ps
+          docker stop staging-container
 
       - name: Deployment Summary
+        if: always()
         run: |
-          echo "## Staging Deployment Successful" >> $GITHUB_STEP_SUMMARY
-          echo "- Environment: Staging" >> $GITHUB_STEP_SUMMARY
-          echo "- Image: sakila-app:staging" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: Success" >> $GITHUB_STEP_SUMMARY
+          echo "## Staging Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: Staging" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: sakila-app:staging" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: Success :white_check_mark:" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify
         run: echo "Slack notification: Deployment to staging successful"
 
-
   deploy-production:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
-    runs-on: ubuntu-latest
     needs: deploy-staging
+    runs-on: ubuntu-latest
     environment: production
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Simulate Production Deployment
         run: |
-          echo " Deploying to PRODUCTION environment"
-          echo "Commit: $GITHUB_SHA"
+          echo "Deploying to PRODUCTION environment"
+          echo "Notification: Simulating production deployment from commit $GITHUB_SHA"
 
       - name: Generate version tag
         run: echo "VERSION=v$(date +'%Y.%m.%d')" >> $GITHUB_ENV
@@ -66,7 +73,7 @@ jobs:
         with:
           tag_name: ${{ env.VERSION }}
           name: Release ${{ env.VERSION }}
-          body: "Production deployment successful"
+          body: "Production deployment successful for version ${{ env.VERSION }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
