@@ -1,9 +1,9 @@
-
 # Name: Noor Bibi + Ahmad Khan
 # Date: 2026-04-24
-# Feature:  Combined Configurations (Update + Health Check)
+# Feature: Combined Configurations (Update + Health Check)
 
 import os
+
 
 class Config:
     # Configuration refined after PR review feedback
@@ -14,4 +14,3 @@ class Config:
     MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'admin')
     MYSQL_DB = os.environ.get('MYSQL_DB', 'sakila')
     SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-here-change-this-in-production')
-        
